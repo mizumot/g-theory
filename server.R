@@ -1,638 +1,248 @@
 library(shiny)
 library(shinyAce)
-library(lme4)
 
-
-
+# ANOVAベースのG理論計算
 
 shinyServer(function(input, output) {
 
-################################################
-# To be used later
-################################################
-
-    mod <- reactive({
+# p × i デザインの分散成分推定
+estimate_var_pi <- function(dat) {
+    dat$Student <- factor(dat$Student)
+    dat$Item <- factor(dat$Item)
     
-        dat <- read.csv(text=input$text, sep="\t")
-        
-        
-        if (input$type == "pi") {
-        
-        dat$Student <- factor(rownames(dat)) # id番号付与
+    np <- length(levels(dat$Student))
+    ni <- length(levels(dat$Item))
+    
+    aov_result <- aov(Score ~ Student + Item, data = dat)
+    aov_summary <- summary(aov_result)[[1]]
+    
+    # 行名のスペースを除去
+    rownames(aov_summary) <- trimws(rownames(aov_summary))
+    
+    MS_p <- aov_summary["Student", "Mean Sq"]
+    MS_i <- aov_summary["Item", "Mean Sq"]
+    MS_res <- aov_summary["Residuals", "Mean Sq"]
+    
+    var_p <- max(0, (MS_p - MS_res) / ni)
+    var_i <- max(0, (MS_i - MS_res) / np)
+    var_res <- MS_res
+    
+    list(Student = var_p, Item = var_i, Residual = var_res,
+         counts = list(Item = ni), np = np, ni = ni)
+}
+
+# p × r × i デザインの分散成分推定
+estimate_var_pri <- function(dat) {
+    dat$Student <- factor(dat$Student)
+    dat$Rater <- factor(dat$Rater)
+    dat$Item <- factor(dat$Item)
+    
+    np <- length(levels(dat$Student))
+    nr <- length(levels(dat$Rater))
+    ni <- length(levels(dat$Item))
+    
+    aov_result <- aov(Score ~ Student * Rater * Item, data = dat)
+    aov_summary <- summary(aov_result)[[1]]
+    
+    # 行名のスペースを除去
+    rownames(aov_summary) <- trimws(rownames(aov_summary))
+    
+    MS_p <- aov_summary["Student", "Mean Sq"]
+    MS_r <- aov_summary["Rater", "Mean Sq"]
+    MS_i <- aov_summary["Item", "Mean Sq"]
+    MS_pr <- aov_summary["Student:Rater", "Mean Sq"]
+    MS_pi <- aov_summary["Student:Item", "Mean Sq"]
+    MS_ri <- aov_summary["Rater:Item", "Mean Sq"]
+    
+    # 三元交互作用を残差として使用
+    MS_res <- aov_summary["Student:Rater:Item", "Mean Sq"]
+    
+    var_p <- max(0, (MS_p - MS_pr - MS_pi + MS_res) / (nr * ni))
+    var_r <- max(0, (MS_r - MS_pr - MS_ri + MS_res) / (np * ni))
+    var_i <- max(0, (MS_i - MS_pi - MS_ri + MS_res) / (np * nr))
+    var_pr <- max(0, (MS_pr - MS_res) / ni)
+    var_pi <- max(0, (MS_pi - MS_res) / nr)
+    var_ri <- max(0, (MS_ri - MS_res) / np)
+    var_res <- MS_res
+    
+    list(Student = var_p, Rater = var_r, Item = var_i,
+         "Student:Rater" = var_pr, "Student:Item" = var_pi, "Rater:Item" = var_ri,
+         Residual = var_res, counts = list(Rater = nr, Item = ni),
+         np = np, nr = nr, ni = ni)
+}
+
+var.est <- reactive({
+    dat <- read.csv(text=input$text, sep="\t")
+    
+    if (input$type == "pi") {
+        dat$Student <- factor(rownames(dat))
         col.n <- length(dat)-1
-        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
+        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction="long")
         dat <- dat[,-1]
         colnames(dat) <- c("Student", "Item", "Score")
-        dat$Item <- factor(dat$Item)
-        
-        model <- lmer(Score ~ (1|Student) + (1|Item),dat)
-        
-        } else { # in case of "pri"
-
-        # 得点以外を因子の型に変更
-        dat$Student <- factor(dat$Student)
-        dat$Rater <- factor(dat$Rater)
-        dat$Item <- factor(dat$Item)
-    
-        model <- lmer(Score ~ 1 + (1|Rater) + (1|Student) + (1|Item) + (1|Student:Rater) + (1|Student:Item) + (1|Rater:Item), data=dat)
-        
-        }
-        
-        list(model = model) # To be used later
-        
-        
-    })
-
-
-
-
-
-################################################
-# Variance components (Sorted)
-################################################
-
-   var.est <- reactive({
-        
-        dat <- read.csv(text=input$text, sep="\t")
-        
-        
-        if (input$type == "pi") {
-            
-            dat$Student <- factor(rownames(dat)) # id番号付与
-            col.n <- length(dat)-1
-            dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
-            dat <- dat[,-1]
-            colnames(dat) <- c("Student", "Item", "Score")
-            dat$Item <- factor(dat$Item)
-            
-            model <- lmer(Score ~ (1|Student) + (1|Item),dat)
-            
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Item")
-            
-        } else { # in case of "pri"
-            
-            dat$Student <- factor(dat$Student)
-            dat$Rater <- factor(dat$Rater)
-            dat$Item <- factor(dat$Item)
-        
-            counts <- list(length(levels(dat$Rater)),length(levels(dat$Item)))
-            names(counts) <- c("Rater","Item")
-            model <- lmer(Score ~ (1|Student) + (1|Rater) + (1|Item) + (1|Student:Rater) + (1|Student:Item) + (1|Item:Rater), dat)
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Rater","Item","Student:Rater","Student:Item","Item:Rater")
-        
-        }
-        
-        varCompTable <- function(vcomp,vcompLbls) {
-            compOut <- c()
-            lbl <- c()
-            for(i in 1:length(vcomp)){
-                compOut[i] <- vcomp[[vcompLbls[i]]][,1]
-                lbl[i] <- vcompLbls[i]
-            }
-            compOut[length(vcomp)+1] <- attr(vcomp, "sc")[[1]]^2
-            lbl[length(vcomp)+1] <- "Residual"
-            
-            compTbl <- data.frame(round(compOut,3),round(compOut/sum(compOut),3)*100)
-            #rownames(compTbl) <- lbl
-            rownames(compTbl) <- gsub(":","*",lbl)
-            colnames(compTbl) <- c("VarComp","%")
-            
-            compTblTemp <- compTbl[1:(nrow(compTbl)-1),]
-            compTblTemp <- compTblTemp[order(compTblTemp[,1],decreasing=T),]
-            compTblOrderd <- rbind(compTblTemp,compTbl[nrow(compTbl),])
-            cat("Variance components\n\n")
-            print(compTbl)
-            cat("\nVariance components (Sorted)\n\n")
-            print(compTblOrderd)
-        }
-        
-        varCompTable(vcomp, vcompLbls)
-    
-   })
-
-
-
-
-
-################################################
-# G-coefficient
-################################################
-
-    g.coef <- reactive({
-        
-        dat <- read.csv(text=input$text, sep="\t")
-        
-        
-        
-        if (input$type == "pi") {
-            
-            dat$Student <- factor(rownames(dat)) # id番号付与
-            col.n <- length(dat)-1
-            dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
-            dat <- dat[,-1]
-            colnames(dat) <- c("Student", "Item", "Score")
-            dat$Item <- factor(dat$Item)
-            
-            counts <- length(levels(dat$Item))
-            names(counts) <- c("Item")
-            
-            model <- lmer(Score ~ (1|Student) + (1|Item),dat)
-            
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Item")
-            
-        } else { # in case of "pri"
-            
-            dat$Student <- factor(dat$Student)
-            dat$Rater <- factor(dat$Rater)
-            dat$Item <- factor(dat$Item)
-            
-            counts <- list(length(levels(dat$Rater)),length(levels(dat$Item)))
-            names(counts) <- c("Rater","Item")
-            model <- lmer(Score ~ (1|Student) + (1|Rater) + (1|Item) + (1|Student:Rater) + (1|Student:Item) + (1|Item:Rater), dat)
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Rater","Item","Student:Rater","Student:Item","Item:Rater")
-            
-        }
-        
-        
-        calcGCoefficient <- function(uniVal,vcomp,vcompLbls,ids,counts) {
-            denoms <- c()
-            denomsVal <- c()
-            denoms[1] <- "as.numeric(vcomp[[uniVal]])"
-            denomsVal[1] <- as.numeric(vcomp[[uniVal]])
-            if (length(ids) > 0) {
-                for(i in 1:length(ids)) {
-                    denomItem <- gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])
-                    if (length(grep(":",denomItem)) > 0){
-                        items <- strsplit(denomItem,":")
-                        countNums <- c()
-                        for (j in 1:length(items[[1]])) {
-                            countNums[j] <- counts[[items[[1]][j]]]
-                        }
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / ',prod(countNums),')',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / prod(countNums)
-                    } else {
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[',i,']])]])',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])]]
-                    }
-                }
-            }
-            
-            countNums <- c()
-            for (i in 1:length(counts)) {
-                countNums[i] <- counts[[i]]
-            }
-            denoms[length(denoms) + 1] <- '(attr(vcomp, "sc")[[1]]^2 / prod(countNums))'
-            denomsVal[length(denomsVal) + 1] <- attr(vcomp, "sc")[[1]]^2 / prod(countNums)
-            return(eval(parse(text=paste(denoms[1],"/ (",paste(denoms,collapse=" + "),")"))))
-        }
-
-        gcoeff <- calcGCoefficient("Student",vcomp,vcompLbls,grep(":Student\\b|\\bStudent:",vcompLbls),counts)
-
-        cat("G =", substr(sprintf("%.3f", round(gcoeff, 3)), 2, 5))
-
-    })
-    
-    
-    
-    
-
-################################################
-# Phi
-################################################
-
-    phi <- reactive({
-    
-        dat <- read.csv(text=input$text, sep="\t")
-    
-    
-        if (input$type == "pi") {
-        
-            dat$Student <- factor(rownames(dat)) # id番号付与
-            col.n <- length(dat)-1
-            dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
-            dat <- dat[,-1]
-            colnames(dat) <- c("Student", "Item", "Score")
-            dat$Item <- factor(dat$Item)
-        
-            counts <- length(levels(dat$Item))
-            names(counts) <- c("Item")
-        
-            model <- lmer(Score ~ (1|Student) + (1|Item),dat)
-        
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Item")
-        
-        } else { # in case of "pri"
-        
-            dat$Student <- factor(dat$Student)
-            dat$Rater <- factor(dat$Rater)
-            dat$Item <- factor(dat$Item)
-        
-            counts <- list(length(levels(dat$Rater)),length(levels(dat$Item)))
-            names(counts) <- c("Rater","Item")
-            model <- lmer(Score ~ (1|Student) + (1|Rater) + (1|Item) + (1|Student:Rater) + (1|Student:Item) + (1|Item:Rater), dat)
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Rater","Item","Student:Rater","Student:Item","Item:Rater")
-        
-        }
-
-
-
-        calcPhiCoefficient <- function(uniVal,vcomp,vcompLbls,counts) {
-            denoms <- c()
-            denomsVal <- c()
-            denoms[1] <- "as.numeric(vcomp[[uniVal]])"
-            denomsVal[1] <- as.numeric(vcomp[[uniVal]])
-            if (length(vcompLbls) > 2) {
-                for(i in 2:length(vcompLbls)) {
-                    denomItem <- gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[i])
-                    if (length(grep(":",denomItem)) > 0){
-                        items <- strsplit(denomItem,":")
-                        countNums <- c()
-                        for (j in 1:length(items[[1]])) {
-                            countNums[j] <- counts[[items[[1]][j]]]
-                        }
-                        denoms[i] <- paste('(as.numeric(vcomp[[vcompLbls[',i,']]]) / ',prod(countNums),')',sep="")
-                        denomsVal[i] <- as.numeric(vcomp[[vcompLbls[i]]]) / prod(countNums)
-                    } else {
-                        denoms[i] <- paste('(as.numeric(vcomp[[vcompLbls[',i,']]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[',i,'])]])',sep="")
-                        denomsVal[i] <- as.numeric(vcomp[[vcompLbls[i]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[i])]]
-                    }
-                }
-            } else {
-                denoms[2] <- paste('(as.numeric(vcomp[[vcompLbls[2]]]) / ',prod(counts[[1]]),')',sep="")
-                denomsVal[2] <- as.numeric(vcomp[[vcompLbls[2]]]) / prod(counts[[1]])
-            }
-            countNums <- c()
-            for (i in 1:length(counts)) {
-                countNums[i] <- counts[[i]]
-            }
-            denoms[length(denoms) + 1] <- '(attr(vcomp, "sc")[[1]]^2 / prod(countNums))'
-            denomsVal[length(denomsVal) + 1] <- attr(vcomp, "sc")[[1]]^2 / prod(countNums)
-            return(eval(parse(text=paste(denoms[1],"/ (",paste(denoms,collapse=" + "),")"))))
-        }
-        
-        phi <- calcPhiCoefficient("Student",vcomp,vcompLbls,counts)
-        cat("Φ =", substr(sprintf("%.3f",round(phi,3)),2,5))
-    
-    })
-
-
-
-
-################################################
-# D study
-################################################
-
-    D <- reactive({
-    
-    
-        if (input$type == "pi") {
-
-            model <- mod()$model
-    
-            vcomp <- VarCorr(model)
-        
-            dat <- read.csv(text=input$text, sep="\t")
-            
-            dat$Student <- factor(rownames(dat)) # id番号付与
-            col.n <- length(dat)-1
-            dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
-            dat <- dat[,-1]
-            colnames(dat) <- c("Student", "Item", "Score")
-            dat$Item <- factor(dat$Item)
-            
-            counts <- length(levels(dat$Item))
-            names(counts) <- c("Item")
-            
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Item")
-    
-    
-        } else { # in case of "pri"
-
-            model <- mod()$model
-
-            vcomp <- VarCorr(model)
-
-            dat <- read.csv(text=input$text, sep="\t")
-
-            dat$Student <- factor(dat$Student)
-            dat$Rater <- factor(dat$Rater)
-            dat$Item <- factor(dat$Item)
-
-            counts <- list(length(levels(dat$Rater)),length(levels(dat$Item)))
-            names(counts) <- c("Rater","Item")
-
-            vcompLbls <- c("Student","Rater","Item","Student:Rater","Student:Item","Item:Rater")
-
-        }
-
-
-
-
-        calcGCoefficient <- function(uniVal,vcomp,vcompLbls,ids,counts) {
-            denoms <- c()
-            denomsVal <- c()
-            denoms[1] <- "as.numeric(vcomp[[uniVal]])"
-            denomsVal[1] <- as.numeric(vcomp[[uniVal]])
-            if (length(ids) > 0) {
-                for(i in 1:length(ids)) {
-                    denomItem <- gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])
-                    if (length(grep(":",denomItem)) > 0){
-                        items <- strsplit(denomItem,":")
-                        countNums <- c()
-                        for (j in 1:length(items[[1]])) {
-                            countNums[j] <- counts[[items[[1]][j]]]
-                        }
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / ',prod(countNums),')',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / prod(countNums)
-                    } else {
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[',i,']])]])',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])]]
-                    }
-                }
-            }
-        
-            countNums <- c()
-            for (i in 1:length(counts)) {
-                countNums[i] <- counts[[i]]
-            }
-            denoms[length(denoms) + 1] <- '(attr(vcomp, "sc")[[1]]^2 / prod(countNums))'
-            denomsVal[length(denomsVal) + 1] <- attr(vcomp, "sc")[[1]]^2 / prod(countNums)
-            return(eval(parse(text=paste(denoms[1],"/ (",paste(denoms,collapse=" + "),")"))))
-        }
-        
-        
-        
-        
-        
-        
-        if (input$type == "pi") {
-            
-            n.items <- input$n.items
-            
-            ival <- 1:n.items
-            ival <- as.numeric(ival)
-            
-            plotValsG <- c()
-            plotVals <- c()
-                for(i in 1:length(ival)) {
-                    counts[[1]] <- ival[i]
-                    plotValsG[i] <- calcGCoefficient("Student",vcomp,vcompLbls,grep(":Student\\b|\\bStudent:",vcompLbls),counts)
-                }
-            
-            cat("G-coefficients\n\n")
-            gvals <- data.frame(substr(matrix(sprintf("%.3f",round(plotValsG,3)),ncol=1),2,5))
-            colnames(gvals) <- c("G-coefficients")
-            rownames(gvals) <- paste("Item","=",ival)
-            print(gvals)
-        
-        
-        } else { # in case of "pri"
-
-            n.raters <- input$n.raters
-            n.items <- input$n.items
-        
-            ival <- 1:n.raters
-            ival <- as.numeric(ival)
-            jval <- 1:n.items
-            jval <- as.numeric(jval)
-            
-            if(length(counts) > 1) {
-                plotValsG <- matrix(nrow=length(ival),ncol=length(jval))
-                    for(i in 1:length(ival)) {
-                        for(j in 1:length(jval)) {
-                            counts[[1]] <- ival[i]
-                            counts[[2]] <- jval[j]
-                            plotValsG[i,j] <- calcGCoefficient("Student",vcomp,vcompLbls,grep(":Student\\b|\\bStudent:",vcompLbls),counts)
-                        }
-            }
-            
-            cat("G-coefficients (row: Rater, column: Item)\n\n")
-            gvals <- data.frame(substr(matrix(sprintf("%.3f",round(plotValsG,3)),ncol=ncol(plotValsG)),2,5))
-            colnames(gvals) <- jval
-            rownames(gvals) <- paste("Rater","=",ival)
-            print(gvals)
-            
-            }
-      
-        }
-        
-    })
-
-
-
-
-################################################
-# plot
-################################################
-
-    makePlot <- function(){
-        
-        
-        if (input$type == "pi") {
-            
-            model <- mod()$model
-            
-            vcomp <- VarCorr(model)
-            
-            dat <- read.csv(text=input$text, sep="\t")
-            
-            dat$Student <- factor(rownames(dat)) # id番号付与
-            col.n <- length(dat)-1
-            dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction = "long")
-            dat <- dat[,-1]
-            colnames(dat) <- c("Student", "Item", "Score")
-            dat$Item <- factor(dat$Item)
-            
-            counts <- length(levels(dat$Item))
-            names(counts) <- c("Item")
-            
-            vcomp <- VarCorr(model)
-            vcompLbls <- c("Student","Item")
-            
-            
-        } else { # in case of "pri"
-            
-            model <- mod()$model
-            
-            vcomp <- VarCorr(model)
-            
-            dat <- read.csv(text=input$text, sep="\t")
-            
-            dat$Student <- factor(dat$Student)
-            dat$Rater <- factor(dat$Rater)
-            dat$Item <- factor(dat$Item)
-            
-            counts <- list(length(levels(dat$Rater)),length(levels(dat$Item)))
-            names(counts) <- c("Rater","Item")
-            
-            vcompLbls <- c("Student","Rater","Item","Student:Rater","Student:Item","Item:Rater")
-            
-        }
-        
-        
-        
-        
-        calcGCoefficient <- function(uniVal,vcomp,vcompLbls,ids,counts) {
-            denoms <- c()
-            denomsVal <- c()
-            denoms[1] <- "as.numeric(vcomp[[uniVal]])"
-            denomsVal[1] <- as.numeric(vcomp[[uniVal]])
-            if (length(ids) > 0) {
-                for(i in 1:length(ids)) {
-                    denomItem <- gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])
-                    if (length(grep(":",denomItem)) > 0){
-                        items <- strsplit(denomItem,":")
-                        countNums <- c()
-                        for (j in 1:length(items[[1]])) {
-                            countNums[j] <- counts[[items[[1]][j]]]
-                        }
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / ',prod(countNums),')',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / prod(countNums)
-                    } else {
-                        denoms[i+1] <- paste('(as.numeric(vcomp[[vcompLbls[ids[',i,']]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[',i,']])]])',sep="")
-                        denomsVal[i+1] <- as.numeric(vcomp[[vcompLbls[ids[i]]]]) / counts[[gsub(paste(":",uniVal,"|",uniVal,":",sep=""),"",vcompLbls[ids[i]])]]
-                    }
-                }
-            }
-            
-            countNums <- c()
-            for (i in 1:length(counts)) {
-                countNums[i] <- counts[[i]]
-            }
-            denoms[length(denoms) + 1] <- '(attr(vcomp, "sc")[[1]]^2 / prod(countNums))'
-            denomsVal[length(denomsVal) + 1] <- attr(vcomp, "sc")[[1]]^2 / prod(countNums)
-            return(eval(parse(text=paste(denoms[1],"/ (",paste(denoms,collapse=" + "),")"))))
-        }
-        
-        
-        
-        
-        
-        
-        if (input$type == "pi") {
-            
-            n.items <- input$n.items
-            
-            ival <- 1:n.items
-            ival <- as.numeric(ival)
-            
-            plotValsG <- c()
-            plotVals <- c()
-            for(i in 1:length(ival)) {
-                counts[[1]] <- ival[i]
-                plotValsG[i] <- calcGCoefficient("Student",vcomp,vcompLbls,grep(":Student\\b|\\bStudent:",vcompLbls),counts)
-            }
-            
-            cat("G-coefficients (row: Rater, column: Item)\n\n")
-            gvals <- data.frame(substr(matrix(sprintf("%.3f",round(plotValsG,3)),ncol=1),2,5))
-            colnames(gvals) <- c("G-coefficients")
-            rownames(gvals) <- paste("Rater","=",ival)
-            
-            plot(c(0,0),xlim=c(min(ival),max(ival)),ylim=c(0, 1),type="n",xlab="Items",ylab="G-coefficients")
-            axis(side=2, at=c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1))
-            axis(side=1, at=ival)
-            points(plotValsG, pch=1, col=1);lines(plotValsG, col=1, lty=1)
-            
-            
-        } else { # in case of "pri"
-            
-            n.raters <- input$n.raters
-            n.items <- input$n.items
-            
-            ival <- 1:n.raters
-            ival <- as.numeric(ival)
-            jval <- 1:n.items
-            jval <- as.numeric(jval)
-            
-            plotValsG <- matrix(nrow=length(ival),ncol=length(jval))
-            for(i in 1:length(ival)) {
-                for(j in 1:length(jval)) {
-                    counts[[1]] <- ival[i]
-                    counts[[2]] <- jval[j]
-                    plotValsG[i,j] <- calcGCoefficient("Student",vcomp,vcompLbls,grep(":Student\\b|\\bStudent:",vcompLbls),counts)
-                }
-            }
-            
-            cat("G-coefficients (row: Rater, column: Item)\n\n")
-            gvals <- data.frame(substr(matrix(sprintf("%.3f",round(plotValsG,3)),ncol=ncol(plotValsG)),2,5))
-            colnames(gvals) <- jval
-            rownames(gvals) <- paste("Rater","=",ival)
-            
-            lbls <- c()
-            for (i in 1:n.raters) {
-                lbls[i] <- paste("Rater =",i)
-            }
-            
-            plot(c(0,0),xlim=c(min(jval),max(jval)),ylim=c(0, 1),type="n",xlab="Items",ylab="G-coefficients")
-            axis(side=2, at=c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1))
-            axis(side=1, at=jval)
-            legend("topleft", cex=0.7, legend = lbls, lty = c(1:n.raters), pch = c(1:n.raters), col = c(1:n.raters))
-            for(i in 1:nrow(plotValsG)) {
-                points(plotValsG[i,], pch=i, col=i);lines(plotValsG[i,], col=i, lty=i)
-            }
-            
-        }
-        
+        vc <- estimate_var_pi(dat)
+        compOut <- c(vc$Student, vc$Item, vc$Residual)
+        lbl <- c("Student", "Item", "Residual")
+    } else {
+        vc <- estimate_var_pri(dat)
+        compOut <- c(vc$Student, vc$Rater, vc$Item, 
+                     vc[["Student:Rater"]], vc[["Student:Item"]], vc[["Rater:Item"]], 
+                     vc$Residual)
+        lbl <- c("Student", "Rater", "Item", "Student*Rater", "Student*Item", "Rater*Item", "Residual")
     }
     
+    compTbl <- data.frame(VarComp = round(compOut, 3), Percent = round(compOut/sum(compOut) * 100, 1))
+    rownames(compTbl) <- lbl
+    colnames(compTbl) <- c("VarComp", "%")
     
-    output$Plot <- renderPlot({
-        print(makePlot())
-    })
+    compTblTemp <- compTbl[1:(nrow(compTbl)-1),]
+    compTblTemp <- compTblTemp[order(compTblTemp[,1], decreasing=T),]
+    compTblOrderd <- rbind(compTblTemp, compTbl[nrow(compTbl),])
     
-    
+    cat("Variance components\n\n")
+    print(compTbl)
+    cat("\nVariance components (Sorted)\n\n")
+    print(compTblOrderd)
+})
 
+g.coef <- reactive({
+    dat <- read.csv(text=input$text, sep="\t")
+    
+    if (input$type == "pi") {
+        dat$Student <- factor(rownames(dat))
+        col.n <- length(dat)-1
+        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction="long")
+        dat <- dat[,-1]
+        colnames(dat) <- c("Student", "Item", "Score")
+        vc <- estimate_var_pi(dat)
+        ni <- vc$ni
+        gcoeff <- vc$Student / (vc$Student + vc$Residual/ni)
+    } else {
+        vc <- estimate_var_pri(dat)
+        nr <- vc$nr
+        ni <- vc$ni
+        gcoeff <- vc$Student / (vc$Student + vc[["Student:Rater"]]/nr + vc[["Student:Item"]]/ni + vc$Residual/(nr*ni))
+    }
+    cat("G =", sprintf("%.3f", round(gcoeff, 3)))
+})
 
+phi <- reactive({
+    dat <- read.csv(text=input$text, sep="\t")
+    
+    if (input$type == "pi") {
+        dat$Student <- factor(rownames(dat))
+        col.n <- length(dat)-1
+        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction="long")
+        dat <- dat[,-1]
+        colnames(dat) <- c("Student", "Item", "Score")
+        vc <- estimate_var_pi(dat)
+        ni <- vc$ni
+        phi_val <- vc$Student / (vc$Student + vc$Item/ni + vc$Residual/ni)
+    } else {
+        vc <- estimate_var_pri(dat)
+        nr <- vc$nr
+        ni <- vc$ni
+        phi_val <- vc$Student / (vc$Student + vc$Rater/nr + vc$Item/ni + 
+                                 vc[["Student:Rater"]]/nr + vc[["Student:Item"]]/ni + 
+                                 vc[["Rater:Item"]]/(nr*ni) + vc$Residual/(nr*ni))
+    }
+    cat("Phi =", sprintf("%.3f", round(phi_val, 3)))
+})
 
-################################################
-# R session info
-################################################
+D <- reactive({
+    dat <- read.csv(text=input$text, sep="\t")
+    
+    if (input$type == "pi") {
+        dat$Student <- factor(rownames(dat))
+        col.n <- length(dat)-1
+        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction="long")
+        dat <- dat[,-1]
+        colnames(dat) <- c("Student", "Item", "Score")
+        vc <- estimate_var_pi(dat)
+        n.items <- input$n.items
+        ival <- 1:n.items
+        gvals <- sapply(ival, function(ni) vc$Student / (vc$Student + vc$Residual/ni))
+        cat("G-coefficients\n\n")
+        result <- data.frame(G = sprintf("%.3f", round(gvals, 3)))
+        rownames(result) <- paste("Item =", ival)
+        print(result)
+    } else {
+        vc <- estimate_var_pri(dat)
+        n.raters <- input$n.raters
+        n.items <- input$n.items
+        ival <- 1:n.raters
+        jval <- 1:n.items
+        plotValsG <- matrix(nrow=length(ival), ncol=length(jval))
+        for(i in 1:length(ival)) {
+            for(j in 1:length(jval)) {
+                nr <- ival[i]
+                ni <- jval[j]
+                plotValsG[i,j] <- vc$Student / (vc$Student + vc[["Student:Rater"]]/nr + vc[["Student:Item"]]/ni + vc$Residual/(nr*ni))
+            }
+        }
+        cat("G-coefficients (row: Rater, column: Item)\n\n")
+        gvals <- data.frame(matrix(sprintf("%.3f", round(plotValsG, 3)), ncol=ncol(plotValsG)))
+        colnames(gvals) <- jval
+        rownames(gvals) <- paste("Rater =", ival)
+        print(gvals)
+    }
+})
 
-    info <- reactive({
-        info1 <- paste("This analysis was conducted with ", strsplit(R.version$version.string, " \\(")[[1]][1], ".", sep = "")# バージョン情報
-        info2 <- paste("It was executed on ", date(), ".", sep = "")# 実行日時
-        cat(sprintf(info1), "\n")
-        cat(sprintf(info2), "\n")
-    })
+makePlot <- function(){
+    dat <- read.csv(text=input$text, sep="\t")
     
-    
-    
-    
-    
-################################################
-# server.R and ui.R connection
-################################################
+    if (input$type == "pi") {
+        dat$Student <- factor(rownames(dat))
+        col.n <- length(dat)-1
+        dat <- reshape(dat, idvar="Student", varying=2:col.n, v.names="Score", direction="long")
+        dat <- dat[,-1]
+        colnames(dat) <- c("Student", "Item", "Score")
+        vc <- estimate_var_pi(dat)
+        n.items <- input$n.items
+        ival <- 1:n.items
+        plotValsG <- sapply(ival, function(ni) vc$Student / (vc$Student + vc$Residual/ni))
+        plot(ival, plotValsG, xlim=c(1, max(ival)), ylim=c(0, 1), type="b", pch=1, col=1, lty=1,
+             xlab="Items", ylab="G-coefficients", main="D Study: G-coefficients by Number of Items")
+        abline(h=0.8, lty=2, col="gray")
+    } else {
+        vc <- estimate_var_pri(dat)
+        n.raters <- input$n.raters
+        n.items <- input$n.items
+        ival <- 1:n.raters
+        jval <- 1:n.items
+        plotValsG <- matrix(nrow=length(ival), ncol=length(jval))
+        for(i in 1:length(ival)) {
+            for(j in 1:length(jval)) {
+                nr <- ival[i]
+                ni <- jval[j]
+                plotValsG[i,j] <- vc$Student / (vc$Student + vc[["Student:Rater"]]/nr + vc[["Student:Item"]]/ni + vc$Residual/(nr*ni))
+            }
+        }
+        lbls <- paste("Rater =", ival)
+        plot(c(0,0), xlim=c(1, max(jval)), ylim=c(0, 1), type="n",
+             xlab="Items", ylab="G-coefficients", main="D Study")
+        abline(h=0.8, lty=2, col="gray")
+        legend("bottomright", cex=0.7, legend=lbls, lty=1:n.raters, pch=1:n.raters, col=1:n.raters)
+        for(i in 1:nrow(plotValsG)) {
+            points(jval, plotValsG[i,], pch=i, col=i)
+            lines(jval, plotValsG[i,], col=i, lty=i)
+        }
+    }
+}
 
-    output$info.out <- renderPrint({
-        info()
-    })
-    
-    
-    
-    
-    
-    output$var.est.out <- renderPrint({
-        var.est()
-    })
-    
-    output$g.coef.out <- renderPrint({
-        g.coef()
-    })
-    
-    output$phi.out <- renderPrint({
-        phi()
-    })
-    
-    output$D.out <- renderPrint({
-        D()
-    })
+output$Plot <- renderPlot({ makePlot() })
 
+info <- reactive({
+    info1 <- paste("This analysis was conducted with ", strsplit(R.version$version.string, " \\(")[[1]][1], ".", sep = "")
+    info2 <- paste("It was executed on ", date(), ".", sep = "")
+    cat(sprintf(info1), "\n")
+    cat(sprintf(info2), "\n")
+})
+
+output$info.out <- renderPrint({ info() })
+output$var.est.out <- renderPrint({ var.est() })
+output$g.coef.out <- renderPrint({ g.coef() })
+output$phi.out <- renderPrint({ phi() })
+output$D.out <- renderPrint({ D() })
 
 })
